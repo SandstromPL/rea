@@ -26,6 +26,23 @@ can be passed directly to `compare_functions`, and `inspect_artifact` Evidence
 to `compare_artifacts`. Use `get_evidence_bundle` when the task needs broader
 retained session history or an explicit bundle for transfer.
 
+`compare_artifacts` does not need that Evidence sent back. Name each side once
+with a source that `inspect_analysis_view` also accepts:
+`{"kind": "retained-evidence", "evidence_id": "<id>"}` for a record retained in
+this session, or `{"kind": "evidence-file", "path": "/absolute/evidence.json"}`
+for a saved record or bundle. Add `evidence_id` to select one record from a
+bundle that holds more than one. Complete inline Evidence is still accepted as
+the third form. The comparison cites the records that the sources resolve to,
+so all three forms give the same comparison Evidence. A retained reference that
+the session cannot resolve is refused with `evidence_integrity_mismatch` and
+`details.reason: "missing"`.
+
+`compare_artifacts` can also resolve an artifact summary to its exact retained
+parent in the session, or from the authenticated bundle containing a file-selected
+summary. File-local records take precedence over the session lookup. Unrelated
+records are not retained by the file resolver. Supported historical summaries keep their original
+Evidence identity and omissions; a missing or mismatched parent is rejected.
+
 `analyze_function` does not deliver its complete record by default. Without
 `detail`, it retains the complete dossier in the session and returns
 `inspect_analysis_view` summary Evidence whose
@@ -296,6 +313,15 @@ a provider. `retention: "complete-record"` describes stored Evidence, while
 unknown metadata. Missing omission counts remain null. Summary output carries
 every matching record; actual transport admission still applies. Omitted
 `detail` preserves complete canonical bundle delivery; filters require summary.
+
+Residual-unknown mutations reject missing Evidence or unknown references and
+unproven verified resolutions with nonretryable `invalid_request` diagnostics.
+`details.constraint` carries the validator's `kind`, owning `unknown_id`, and
+missing `evidence_id` or `related_unknown_id` where applicable. Correct the
+reported input or supply the required retained Evidence; unchanged retries do
+not repair these constraints. Rejected mutations leave retained state unchanged.
+Revision conflicts remain retryable `revision_conflict`; broken revision histories
+remain `evidence_integrity_mismatch`.
 
 `list_unknowns` returns every matching current head by default. For a smaller
 inline response, supply `offset` and `limit`, then follow `next_offset` until it
@@ -817,7 +843,12 @@ the bound address is local; names are added only after classifying the actual IP
 On such a bind, requests whose `Host` header is outside the SDK loopback allowlist plus
 the configured name and the bound address are refused with `403`, and a browser
 `Origin` outside that allowlist is refused the same way (a missing `Origin`
-passes); a non-loopback bind relaxes both checks and logs the relaxation. A reply sent before a request body was read (a refused `Host` or `Origin`, an unknown route, the startup `503`) closes the connection after the reply, so an unread upload cannot keep a socket open. Request targets are taken verbatim as origin-form paths (`//host/path` is a path, not another origin); an absolute-form target, a target containing a raw fragment delimiter (`#`), or one whose path URL parsing would rewrite (dot segments such as `/public/../mcp`), is refused with `400`, and a method Fetch does not support with `405`. Percent-encoded `%23` remains valid query data. Only an `initialize` object can replace an open session. A sessionless array containing initialize, including a one-element array, is refused with HTTP `400` before session creation or handover. Scoped
+passes). A non-loopback bind requires `MCP_ALLOWED_HOSTS`, or
+`--allowed-hosts` for `rea mcp --http`, listing every client host name or IP
+address. Configuration validates and canonicalizes complete tokens once;
+URLs, ports and empty entries are refused. Both Host and Origin checks remain
+active on that declared list. The announced URL uses the bound hostname if
+admitted, otherwise the first declared hostname, with the actual bound port. A reply sent before a request body was read (a refused `Host` or `Origin`, an unknown route, the startup `503`) closes the connection after the reply, so an unread upload cannot keep a socket open. Request targets are taken verbatim as origin-form paths (`//host/path` is a path, not another origin); an absolute-form target, a target containing a raw fragment delimiter (`#`), or one whose path URL parsing would rewrite (dot segments such as `/public/../mcp`), is refused with `400`, and a method Fetch does not support with `405`. Percent-encoded `%23` remains valid query data. Only an `initialize` object can replace an open session. A sessionless array containing initialize, including a one-element array, is refused with HTTP `400` before session creation or handover. Scoped
 IPv6 literals (`fe80::1%eth0`) are refused before binding, because no URL can
 name them. Listener errors reach the runtime's connection-loss handler only
 after a successful bind; a bind failure prints the listen-failure message alone. Request bodies are bounded by the SDK's
@@ -1201,7 +1232,18 @@ attachment. Native checksum verification failures still refuse traversal;
 Occurrences use normalized logical paths for identity and lookup. Optional
 `source_path` retains the original path within the owning reader when Unicode
 NFC or reader admission changes its spelling; it is source evidence, not an
-output destination. POSIX letter-colon names such as `a:b` remain valid logical
+output destination. New ASAR file occurrences explicitly record the boolean
+`unpacked`: `true` identifies a companion file and `false` identifies a packed
+entry. This field describes archive storage, independently of whether the bytes
+were available or passed integrity verification. Older occurrences may omit it;
+omission remains unknown and must not be defaulted to `false`. Consumers that
+previously accepted only literal `true` must also accept `false`, while retaining
+support for omitted historical values.
+`compare_artifacts` reports a metadata change when both storage values are
+known and differ. If only one value is known, storage comparison is unknown;
+when both are omitted, storage is not compared.
+
+POSIX letter-colon names such as `a:b` remain valid logical
 names; Windows extraction refuses names its filesystem cannot materialize.
 
 Extraction materializes regular files exposed by the active archive reader.
@@ -1228,10 +1270,21 @@ failures for such entries name this cause and the operation to rerun with
 Advertised input and output schemas contain no reachable recursive references.
 Input schemas inline repeated definitions before applying the selected
 presentation profile. Both `full` and `compact` start from this self-contained
-projection; output schemas can share schema-local definitions. Full inputs
-retain nested fields, descriptions and valid literal examples. The compatibility
+projection; output schemas can share schema-local definitions. Analyst-authored
+full inputs retain nested fields, descriptions and valid literal examples. The compatibility
 projections below can relax advertised constraints; canonical runtime validation
 still enforces the complete input contract.
+
+`compare_web_captures` declares its complete producer observations as object
+operands instead of repeating their full output schemas in the input catalog.
+Pass the original `inspect_web_page` normalized result in `before.inspection`
+and `after.inspection`, optional complete `discover_webmcp_tools` results in
+`webmcp`, or complete `capture_browser_scenario` results in the scenario fields.
+Do not construct partial observations from the abbreviated declaration: the
+server still validates every canonical field before comparison. Input groups
+and analyst-authored normalization rules remain explicit. This presentation
+changes no capture bytes, identity, completeness, or comparison semantics and
+does not reduce `inspect_analysis_view` selectors or other tools' declarations.
 
 When a host forwards input schemas to the model, their examples consume context.
 REA's advertised examples therefore never copy complete producer Evidence.
@@ -1471,6 +1524,8 @@ validates every result before delivery. On catalogs large enough that full
 input schemas alone approach the frame limit, keep the input profile at its
 `compact` default as well; with full input schemas the advertisement is
 dominated by the input side.
+The full input profile has no one-megabyte catalog-frame guarantee, including
+when output schemas are omitted.
 
 Only client-side schema discovery and validation are reduced or omitted, so
 hosts using these profiles should rely on REA's validation and retain their

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import {
   open,
+  type FileHandle,
   chmod,
   mkdir,
   readFile,
@@ -12,7 +13,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { buildBinary } from "plist";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { parseBinaryTarget } from "../../../src/application/BinaryTargetResolver.js";
 import {
@@ -31,6 +32,12 @@ import { hasXmlPlistSignature } from "../../../src/domain/apple/appleArchiveForm
 import { parseExecutableHeader } from "../../../src/domain/binaryTarget.js";
 import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { ESP8266_REFUSAL } from "../../../src/domain/firmware/espImage.js";
+import {
+  ESP32C3_APP_SEGMENTS,
+  esp8266Image,
+  espImage,
+} from "../../fixtures/espImage.js";
 import { javaClassFile } from "../../fixtures/javaClassFile.js";
 import {
   MAX_JVM_CLASS_IDENTITY_BYTES,
@@ -511,6 +518,65 @@ describe("binary target I/O: package classification", () => {
     expect(hasXmlPlistSignature(Buffer.from(`<root><plist/></root>`))).toBe(
       false,
     );
+  });
+
+  it("classifies Intel HEX and S-records by a valid first record", async () => {
+    const directory = await createTestTempDirectory("rea-hex-target-");
+    const hex = join(directory, "firmware.hex");
+    const text = join(directory, "firmware.txt");
+    const srec = join(directory, "firmware.mot");
+    const bad = join(directory, "bad.hex");
+    await Promise.all([
+      writeFile(hex, ":0300300002337A1E\n:00000001FF\n"),
+      writeFile(text, ":00000001FF\n"),
+      writeFile(srec, "S9030000FC\n"),
+      writeFile(bad, ":0300300002337A1F\n:00000001FF\n"),
+    ]);
+    for (const [path, format] of [
+      [hex, "intel-hex"],
+      [text, "intel-hex"],
+      [srec, "srec"],
+    ] as const)
+      expect(await parseBinaryTarget(path)).toMatchObject({
+        ok: true,
+        value: { kind: "archive", format },
+      });
+    expect(await parseBinaryTarget(bad)).toMatchObject({
+      ok: false,
+      error: { _tag: "BinaryTargetError" },
+    });
+  });
+
+  it("classifies ESP images by bytes and refuses ESP8266 v1 images", async () => {
+    const directory = await createTestTempDirectory("rea-esp-target-");
+    const app = join(directory, "firmware.ota");
+    const truncated = join(directory, "download.bin");
+    const esp8266 = join(directory, "esp8266.bin");
+    const encrypted = join(directory, "encrypted.bin");
+    const image = espImage({ segments: ESP32C3_APP_SEGMENTS });
+    await Promise.all([
+      writeFile(app, image),
+      writeFile(truncated, image.subarray(0, 40)),
+      writeFile(esp8266, esp8266Image()),
+      writeFile(encrypted, Buffer.alloc(4096, 0x5a)),
+    ]);
+    for (const path of [app, truncated])
+      expect(await parseBinaryTarget(path)).toMatchObject({
+        ok: true,
+        value: { kind: "archive", format: "esp-image" },
+      });
+    expect(await parseBinaryTarget(esp8266)).toMatchObject({
+      ok: false,
+      error: {
+        _tag: "BinaryTargetError",
+        constraint: "file_format_rejected",
+        reason: ESP8266_REFUSAL,
+      },
+    });
+    // Flash-encrypted bytes carry no magic; they stay unrecognized, not ESP.
+    const unrecognized = await parseBinaryTarget(encrypted);
+    expect(unrecognized.ok).toBe(false);
+    expect(JSON.stringify(unrecognized)).not.toContain("ESP");
   });
 
   it("does not trust a ZIP-family extension without ZIP magic", async () => {
@@ -1417,4 +1483,63 @@ describe("binary target I/O: PE CodeView header ranges", () => {
       }
     },
   );
+});
+
+it("does not read a relocation table offset when DOS declares zero records", async () => {
+  const directory = await createTestTempDirectory("rea-empty-dos-relocations-");
+  const path = join(directory, "legacy.exe");
+  const bytes = dosMz(8192);
+  bytes.writeUInt16LE(257, 8);
+  bytes.writeUInt16LE(4104, 24);
+  bytes.writeUInt32LE(0, 60);
+  await writeFile(path, bytes);
+  const probe = await open(path, "r");
+  const prototype = Object.getPrototypeOf(probe) as FileHandle;
+  await probe.close();
+  const reads = vi.spyOn(prototype, "read");
+  try {
+    expect(await parseBinaryTarget(path)).toMatchObject({
+      ok: true,
+      value: { format: "dos-mz", architecture: "x86" },
+    });
+    const lengths = reads.mock.calls.map(
+      (args) => (args as readonly unknown[])[2],
+    );
+    expect(lengths).toContain(4096);
+    expect(lengths).not.toContain(4104);
+  } finally {
+    reads.mockRestore();
+  }
+});
+
+it("recognizes Windows metadata independently of invalid DOS load declarations", async () => {
+  const directory = await createTestTempDirectory("rea-invalid-dos-valid-pe-");
+  const path = join(directory, "windows.exe");
+  const bytes = pe(0x8664, 8192);
+  bytes.writeUInt16LE(0, 4);
+  bytes.writeUInt16LE(1010, 6);
+  bytes.writeUInt16LE(257, 8);
+  bytes.writeUInt16LE(64, 24);
+  await writeFile(path, bytes);
+  expect(await parseBinaryTarget(path)).toMatchObject({
+    ok: true,
+    value: { format: "pe", architecture: "x86_64" },
+  });
+});
+
+it("refuses a declared DOS relocation header that is not present in the file", async () => {
+  const directory = await createTestTempDirectory(
+    "rea-truncated-dos-relocations-",
+  );
+  const path = join(directory, "legacy.exe");
+  const bytes = dosMz(8192);
+  bytes.writeUInt16LE(1010, 6);
+  bytes.writeUInt16LE(257, 8);
+  bytes.writeUInt16LE(64, 24);
+  bytes.writeUInt32LE(0, 60);
+  await writeFile(path, bytes.subarray(0, 4096));
+  expect(await parseBinaryTarget(path)).toMatchObject({
+    ok: false,
+    error: { reason: "truncated DOS MZ load module" },
+  });
 });
