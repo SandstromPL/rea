@@ -501,7 +501,7 @@ const firmwareStagingLimit = (
  * staged file that reaches the producer's limit may be truncated. That limit
  * sits one byte above every budget unless an inherited ceiling removed the byte.
  */
-const firmwareFileSizeLimitReached = (
+export const firmwareFileSizeLimitReached = (
   operation: string,
   fileSizeBytes: number,
 ) =>

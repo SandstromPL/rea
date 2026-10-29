@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { expect, it, onTestFinished } from "vitest";
+import { firmwareFileSizeLimitReached } from "../../src/firmware/FirmwareFiles.js";
 import { FIRMWARE_LIMITS } from "../../src/firmware/FirmwareRelease.js";
 import { firmwareFileSizeService } from "../fixtures/firmware/fileSizeProducer.js";
 import { assertFirmwareCleanup } from "../fixtures/firmware/provider.js";
@@ -43,7 +44,11 @@ it.skipIf(process.platform !== "linux")(
         resource: "file-size",
         reportedLimits: { file_size_bytes: budget },
         retryable: false,
-        remediationAction: expect.stringContaining("ulimit -f"),
+        // The inventory refusal, not the producer's SIGXFSZ recovery, owns this.
+        remediationAction: firmwareFileSizeLimitReached(
+          "extract_firmware",
+          budget,
+        ).remediationAction,
       },
     });
     await expect(access(fixture.output)).rejects.toMatchObject({

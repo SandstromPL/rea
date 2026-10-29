@@ -10,6 +10,7 @@ import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory
 import { AnalysisCapabilityUnavailableError } from "../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { FIRMWARE_LIMITS } from "./FirmwareRelease.js";
+import { firmwareSignalLimitError } from "./FirmwareFailures.js";
 import { FirmwareFileAccess } from "./FirmwareFiles.js";
 import {
   resolveFirmwareCommand,
@@ -298,16 +299,12 @@ it.each([
   {
     inherited: Number.MAX_SAFE_INTEGER,
     limit: sixteenMiB + 1,
-    remediation: "one byte above max_output_bytes",
+    adjustable: true,
   },
-  {
-    inherited: sixteenMiB + 1,
-    limit: sixteenMiB + 1,
-    remediation: "This release has no runtime override",
-  },
+  { inherited: sixteenMiB + 1, limit: sixteenMiB + 1, adjustable: false },
 ])(
   "recommends a larger max_output_bytes on SIGXFSZ only when it raises the limit (inherited $inherited)",
-  async ({ inherited, limit, remediation }) => {
+  async ({ inherited, limit, adjustable }) => {
     const root = await createTestTempDirectory("rea-firmware-fsize-signal-");
     const analysis = new AbortController();
     const failure: unknown = await runFirmwareCommand({
@@ -329,8 +326,19 @@ it.each([
       _tag: "AnalysisResourceConstraintError",
       resource: "file-size",
       reportedLimits: { file_size_bytes: limit },
-      remediationAction: expect.stringContaining(remediation),
+      retryable: false,
     });
+    // Compare with the recovery owner instead of its wording; the two branches
+    // must differ for the comparison to pin the selected one.
+    const recovery = (fileSizeAdjustable: boolean) =>
+      firmwareSignalLimitError(
+        "extract_firmware",
+        "SIGXFSZ",
+        limit,
+        fileSizeAdjustable,
+      )?.remediationAction;
+    expect(recovery(true)).not.toBe(recovery(false));
+    expect(failure).toHaveProperty("remediationAction", recovery(adjustable));
   },
 );
 
